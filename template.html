@@ -36,7 +36,7 @@
   #tip { display:none; padding:6px 10px; background:rgba(8,10,20,.88); border:1px solid rgba(143,180,255,.3);
     border-radius:6px; transform:translate(14px,14px); white-space:nowrap; z-index:5; }
   #tip b { color:var(--acc); }
-  #hint { left:50%; bottom:78px; transform:translateX(-50%); color:var(--dim); font-size:10px; letter-spacing:.14em; text-transform:uppercase; }
+  #hint { white-space:nowrap; left:50%; bottom:78px; transform:translateX(-50%); color:var(--dim); font-size:10px; letter-spacing:.14em; text-transform:uppercase; }
   @media (max-width:700px){ #title h1{font-size:15px} #stats b{font-size:24px} #rhythm,#legend,#hint{display:none} #date{top:64px;font-size:14px} }
 </style>
 </head>
@@ -51,7 +51,7 @@
 </div>
 <div class="hud" id="rhythm"><canvas id="rc" width="240" height="84"></canvas><small>weekly rhythm &middot; mon&ndash;sun &times; 24h</small></div>
 <div class="hud" id="legend">hour of day<i></i>midnight &rarr; midnight</div>
-<div class="hud" id="hint">drag to orbit &middot; scroll to zoom &middot; space to play/pause &middot; t for tour</div>
+<div class="hud" id="hint">drag to orbit &middot; scroll to zoom &middot; click a star to focus, esc to reset &middot; space play/pause &middot; t tour</div>
 <div class="hud" id="tip"></div>
 <div id="bar">
   <button id="play">&#10074;&#10074;</button>
@@ -183,9 +183,16 @@ const repoPts = new THREE.Points(rg, rm); repoPts.frustumCulled = false; scene.a
 
 // ---------- camera control ----------
 const cam = { th: 0.6, ph: 1.05, d: 105, tth: 0.6, tph: 1.05, td: 105 };
-let tour = true, drag = false, lx = 0, ly = 0, mouse = null;
-canvas.addEventListener("pointerdown", e => { drag = true; lx = e.clientX; ly = e.clientY; canvas.classList.add("drag"); canvas.setPointerCapture(e.pointerId); });
-addEventListener("pointerup", () => { drag = false; canvas.classList.remove("drag"); });
+let tour = true, drag = false, lx = 0, ly = 0, mouse = null, hoverIdx = -1, downAt = [0, 0];
+const focus = { cur: [0, 0, 0], tgt: [0, 0, 0] };
+function setFocus(i) {   // i < 0 resets to the whole galaxy
+  if (i >= 0) { focus.tgt = pos[i].slice(); cam.td = 22; if (tour) tourBtn.click(); }
+  else { focus.tgt = [0, 0, 0]; cam.td = 105; }
+}
+canvas.addEventListener("pointerdown", e => { drag = true; lx = downAt[0] = e.clientX; ly = downAt[1] = e.clientY; canvas.classList.add("drag"); canvas.setPointerCapture(e.pointerId); });
+addEventListener("pointerup", e => { drag = false; canvas.classList.remove("drag");
+  if (Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) < 5 && e.target === canvas) setFocus(hoverIdx); });
+addEventListener("keydown", e => { if (e.key === "Escape") setFocus(-1); });
 addEventListener("pointermove", e => { mouse = [e.clientX, e.clientY];
   if (!drag) return; cam.tth -= (e.clientX - lx) * .006; cam.tph = Math.max(.15, Math.min(Math.PI - .15, cam.tph - (e.clientY - ly) * .006)); lx = e.clientX; ly = e.clientY; });
 canvas.addEventListener("wheel", e => { e.preventDefault(); cam.td = Math.max(12, Math.min(320, cam.td * Math.exp(e.deltaY * .001))); }, { passive: false });
@@ -223,6 +230,7 @@ function drawRhythm(upto) {
 // ---------- tooltip ----------
 const tip = $("tip"), v3 = new THREE.Vector3();
 function hover(w, h, repoCounts) {
+  hoverIdx = -1;
   if (!mouse || drag) { tip.style.display = "none"; return; }
   let best = -1, bd = 26 * 26;
   for (let i = 0; i < repos.length; i++) { if (!repoCounts[i]) continue;
@@ -230,6 +238,7 @@ function hover(w, h, repoCounts) {
     const dx = (v3.x * .5 + .5) * w - mouse[0], dy = (-v3.y * .5 + .5) * h - mouse[1], d = dx * dx + dy * dy;
     if (d < bd) { bd = d; best = i; } }
   if (best < 0) { tip.style.display = "none"; return; }
+  hoverIdx = best;
   tip.style.display = "block"; tip.style.left = mouse[0] + "px"; tip.style.top = mouse[1] + "px";
   tip.innerHTML = `<b>${repos[best].n.replace(/</g, "&lt;")}</b><br>${repoCounts[best]} / ${repos[best].k} commits`;
 }
@@ -266,8 +275,9 @@ function frame(t) {
 
   if (tour && !drag) { cam.tth += dt * .07; cam.tph = 1.0 + Math.sin(clock * .05) * .22; cam.td = cam.td + (105 + Math.sin(clock * .08) * 30 - cam.td) * dt * .3; cam.th = cam.tth; }
   cam.th += (cam.tth - cam.th) * .08; cam.ph += (cam.tph - cam.ph) * .08; cam.d += (cam.td - cam.d) * .08;
-  camera.position.set(cam.d * Math.sin(cam.ph) * Math.cos(cam.th), cam.d * Math.cos(cam.ph), cam.d * Math.sin(cam.ph) * Math.sin(cam.th));
-  camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+  for (let k = 0; k < 3; k++) focus.cur[k] += (focus.tgt[k] - focus.cur[k]) * .07;
+  camera.position.set(focus.cur[0] + cam.d * Math.sin(cam.ph) * Math.cos(cam.th), focus.cur[1] + cam.d * Math.cos(cam.ph), focus.cur[2] + cam.d * Math.sin(cam.ph) * Math.sin(cam.th));
+  camera.lookAt(focus.cur[0], focus.cur[1], focus.cur[2]); camera.updateMatrixWorld();
   commitPts.rotation.y = repoPts.rotation.y = 0;
   renderer.render(scene, camera);
   hover(innerWidth, innerHeight, repoCounts);
