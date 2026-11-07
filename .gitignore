@@ -1,0 +1,6 @@
+# Generated output contains the owner's activity data - never commit it
+*.html
+!template.html
+data/
+out/
+__pycache__/

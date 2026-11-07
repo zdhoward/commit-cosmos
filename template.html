@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root { --bg:#04050a; --fg:#dfe6ff; --dim:#7d86a8; --acc:#8fb4ff; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden;
+    font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  canvas#gl { position:fixed; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
+  canvas#gl.drag { cursor:grabbing; }
+  .hud { position:fixed; pointer-events:none; }
+  #title { left:24px; top:20px; }
+  #title h1 { margin:0; font:300 22px/1.1 system-ui,sans-serif; letter-spacing:.32em; text-transform:uppercase; }
+  #title p { margin:6px 0 0; color:var(--dim); letter-spacing:.08em; }
+  #stats { right:24px; top:20px; text-align:right; }
+  #stats b { display:block; font:200 38px/1 system-ui,sans-serif; letter-spacing:.02em; }
+  #stats span { color:var(--dim); text-transform:uppercase; letter-spacing:.16em; font-size:10px; }
+  #stats div { margin-bottom:10px; }
+  #date { left:50%; top:20px; transform:translateX(-50%); font:200 20px system-ui,sans-serif; letter-spacing:.3em; color:var(--acc); }
+  #rhythm { left:24px; bottom:96px; }
+  #rhythm canvas { display:block; width:240px; height:84px; }
+  #rhythm small { color:var(--dim); letter-spacing:.14em; text-transform:uppercase; font-size:10px; }
+  #legend { right:24px; bottom:96px; text-align:right; color:var(--dim); font-size:10px; letter-spacing:.1em; }
+  #legend i { display:inline-block; width:90px; height:6px; border-radius:3px; vertical-align:middle; margin:0 6px;
+    background:linear-gradient(90deg,#3b3fd6,#9a4be0,#ff7a5c,#ffd45e,#7be0a8,#3b3fd6); }
+  #bar { position:fixed; left:0; right:0; bottom:0; padding:18px 24px 22px; display:flex; gap:14px; align-items:center;
+    background:linear-gradient(transparent,rgba(4,5,10,.85)); }
+  button, select { background:rgba(143,180,255,.08); color:var(--fg); border:1px solid rgba(143,180,255,.28);
+    border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  button:hover, select:hover { background:rgba(143,180,255,.18); }
+  button.on { background:rgba(143,180,255,.3); }
+  input[type=range] { flex:1; accent-color:var(--acc); height:4px; }
+  #tip { display:none; padding:6px 10px; background:rgba(8,10,20,.88); border:1px solid rgba(143,180,255,.3);
+    border-radius:6px; transform:translate(14px,14px); white-space:nowrap; z-index:5; }
+  #tip b { color:var(--acc); }
+  #hint { left:50%; bottom:78px; transform:translateX(-50%); color:var(--dim); font-size:10px; letter-spacing:.14em; text-transform:uppercase; }
+  @media (max-width:700px){ #title h1{font-size:15px} #stats b{font-size:24px} #rhythm,#legend,#hint{display:none} #date{top:64px;font-size:14px} }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div class="hud" id="title"><h1>__TITLE__</h1><p id="sub"></p></div>
+<div class="hud" id="date"></div>
+<div class="hud" id="stats">
+  <div><b id="sCommits">0</b><span>commits</span></div>
+  <div><b id="sLines">0</b><span>lines touched</span></div>
+  <div><b id="sRepos">0</b><span>systems</span></div>
+</div>
+<div class="hud" id="rhythm"><canvas id="rc" width="240" height="84"></canvas><small>weekly rhythm &middot; mon&ndash;sun &times; 24h</small></div>
+<div class="hud" id="legend">hour of day<i></i>midnight &rarr; midnight</div>
+<div class="hud" id="hint">drag to orbit &middot; scroll to zoom &middot; space to play/pause &middot; t for tour</div>
+<div class="hud" id="tip"></div>
+<div id="bar">
+  <button id="play">&#10074;&#10074;</button>
+  <input id="scrub" type="range" min="0" max="10000" value="0">
+  <select id="speed"><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select>
+  <button id="tour" class="on">tour</button>
+</div>
+__THREE__
+<script>
+const DATA = /*__DATA__*/null;
+(() => {
+"use strict";
+const DAY = 86400, PI2 = Math.PI * 2;
+const repos = DATA.repos, commits = DATA.commits;
+const T0 = commits[0][1];
+// Virtual timeline: idle gaps longer than 9 days are squeezed to 9 so playback never sits in the dark.
+const vt = new Float64Array(commits.length);
+for (let i = 1; i < commits.length; i++) vt[i] = vt[i - 1] + Math.min(9, (commits[i][1] - commits[i - 1][1]) / 86400);
+const span = Math.max(1, vt[vt.length - 1] + 3);
+
+// ---------- helpers ----------
+const rng = s => () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const hourColor = h => { const t = h / 24; // night indigo -> violet -> coral -> gold -> mint -> indigo
+  const c = [0.55 + 0.45 * Math.cos(PI2 * (t * 1 + 0.02)), 0.45 + 0.35 * Math.cos(PI2 * (t * 1 - 0.30)), 0.7 + 0.3 * Math.cos(PI2 * (t * 1 - 0.55))];
+  return c.map(v => Math.max(0.08, Math.min(1, v))); };
+const bsearch = (arr, x) => { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] <= x) lo = m + 1; else hi = m; } return lo; };
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
+
+// ---------- per-repo / prefix data ----------
+const N = commits.length;
+const births = new Float32Array(N);              // days since T0
+const repoBirths = repos.map(() => []);
+const repoLines = repos.map(() => 0);
+const cumCommit = new Float64Array(N + 1), cumLines = new Float64Array(N + 1);
+const grid = new Array(N);                        // for rhythm: index in 7x24
+commits.forEach((c, i) => {
+  births[i] = vt[i];
+  repoBirths[c[0]].push(births[i]);
+  const lines = c[2] + c[3];
+  repoLines[c[0]] += lines;
+  cumCommit[i + 1] = i + 1; cumLines[i + 1] = cumLines[i] + lines;
+  grid[i] = c[5] * 24 + c[4];
+});
+const repoTotalLines = repoLines.slice();
+const catOf = repos.map((_, r) => { const s = [0, 0, 0, 0, 0, 0]; commits.forEach(c => { if (c[0] === r) c[6].forEach((v, k) => s[k] += v); }); return s.indexOf(Math.max(...s)); });
+const catHue = [[.55, .72, 1], [.75, .75, .6], [1, .6, .45], [.5, 1, .8], [1, .5, .85], [.8, .8, .85]];
+
+// ---------- galaxy layout ----------
+const pos = repos.map((r, i) => {
+  const R = rng(i * 7919 + 13);
+  const arm = i % 3, t = i / Math.max(1, repos.length - 1);
+  const ang = arm * (PI2 / 3) + t * 5.2 + (R() - .5) * .5;
+  const rad = 14 + t * 46 + R() * 8;
+  return [Math.cos(ang) * rad, (R() - .5) * 9, Math.sin(ang) * rad];
+});
+
+// ---------- three.js ----------
+const canvas = document.getElementById("gl");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x04050a, 1);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 2000);
+const blend = { transparent: true, depthWrite: false, blending: THREE.AdditiveBlending };
+
+const FRAG = `precision mediump float; varying vec3 vC; varying float vA;
+  void main(){ float d=length(gl_PointCoord-.5); if(d>.5) discard; float a=pow(1.-2.*d,2.); gl_FragColor=vec4(vC*a*vA, a*vA); }`;
+
+// commit particles
+const cg = new THREE.BufferGeometry();
+const cCenter = new Float32Array(N * 3), cOrb = new Float32Array(N * 4), cBirth = new Float32Array(N), cSz = new Float32Array(N), cCol = new Float32Array(N * 3);
+const maxLog = Math.log10(1 + Math.max(...commits.map(c => c[2] + c[3])));
+commits.forEach((c, i) => {
+  const R = rng(i * 104729 + 7), p = pos[c[0]], lines = c[2] + c[3];
+  const l = Math.log10(1 + lines) / maxLog;
+  const rad = 1.6 + l * 7.5 + R() * 1.6;
+  cCenter.set(p, i * 3);
+  cOrb.set([rad, R() * PI2, (0.9 / Math.pow(rad, 0.85)) * (R() < .15 ? -1 : 1), (R() - .5) * 1.7], i * 4);
+  cBirth[i] = births[i];
+  cSz[i] = 0.5 + l * 1.3;
+  cCol.set(hourColor(c[4] + R() * 0.8), i * 3);
+});
+cg.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+cg.setAttribute("center", new THREE.BufferAttribute(cCenter, 3));
+cg.setAttribute("orb", new THREE.BufferAttribute(cOrb, 4));
+cg.setAttribute("birth", new THREE.BufferAttribute(cBirth, 1));
+cg.setAttribute("sz", new THREE.BufferAttribute(cSz, 1));
+cg.setAttribute("col", new THREE.BufferAttribute(cCol, 3));
+const cu = { uTime: { value: 0 }, uNow: { value: 0 }, uPx: { value: 400 } };
+const cm = new THREE.ShaderMaterial({ uniforms: cu, ...blend,
+  vertexShader: `attribute vec3 center; attribute vec4 orb; attribute float birth; attribute float sz; attribute vec3 col;
+  uniform float uTime,uNow,uPx; varying vec3 vC; varying float vA;
+  void main(){ float age=uNow-birth; vC=col;
+    if(age<0.){ gl_Position=vec4(2.,2.,2.,1.); gl_PointSize=0.; vA=0.; return; }
+    float a=orb.y+uTime*orb.z;
+    vec3 p=center+vec3(cos(a)*orb.x, sin(a)*orb.x*sin(orb.w), sin(a)*orb.x*cos(orb.w));
+    float fl=exp(-age/2.5);
+    vec4 mv=modelViewMatrix*vec4(p,1.); gl_Position=projectionMatrix*mv;
+    gl_PointSize=sz*(1.+fl*5.)*uPx/-mv.z; vA=.32+.68*fl; vC=col*(1.+fl*1.6); }`,
+  fragmentShader: FRAG });
+const commitPts = new THREE.Points(cg, cm); commitPts.frustumCulled = false; scene.add(commitPts);
+
+// repo stars (CPU-updated size/brightness)
+const rg = new THREE.BufferGeometry();
+const rPos = new Float32Array(repos.length * 3), rSz = new Float32Array(repos.length), rBr = new Float32Array(repos.length), rCol = new Float32Array(repos.length * 3);
+repos.forEach((r, i) => { rPos.set(pos[i], i * 3); rCol.set(catHue[catOf[i]], i * 3); });
+rg.setAttribute("position", new THREE.BufferAttribute(rPos, 3));
+rg.setAttribute("sz", new THREE.BufferAttribute(rSz, 1));
+rg.setAttribute("br", new THREE.BufferAttribute(rBr, 1));
+rg.setAttribute("col", new THREE.BufferAttribute(rCol, 3));
+const ru = { uPx: cu.uPx };
+const rm = new THREE.ShaderMaterial({ uniforms: ru, ...blend,
+  vertexShader: `attribute float sz; attribute float br; attribute vec3 col; uniform float uPx; varying vec3 vC; varying float vA;
+  void main(){ vec4 mv=modelViewMatrix*vec4(position,1.); gl_Position=projectionMatrix*mv; gl_PointSize=sz*uPx/-mv.z; vA=br; vC=col; }`,
+  fragmentShader: `precision mediump float; varying vec3 vC; varying float vA;
+  void main(){ float d=length(gl_PointCoord-.5); if(d>.5) discard; float core=smoothstep(.12,0.,d); float halo=pow(1.-2.*d,3.);
+    gl_FragColor=vec4((vC*halo*.9+vec3(1.)*core)*vA, 1.); }` });
+const repoPts = new THREE.Points(rg, rm); repoPts.frustumCulled = false; scene.add(repoPts);
+
+// background dust + faint disc glow
+{ const n = 2600, g = new THREE.BufferGeometry(), p = new Float32Array(n * 3), s = new Float32Array(n), b = new Float32Array(n), c = new Float32Array(n * 3), R = rng(99);
+  for (let i = 0; i < n; i++) { const a = R() * PI2, r = Math.pow(R(), .6) * 140 + 4; p.set([Math.cos(a) * r, (R() - .5) * 26 * (1 - r / 190), Math.sin(a) * r], i * 3);
+    s[i] = .12 + R() * .35; b[i] = .12 + R() * .28; const w = R(); c.set([.5 + w * .3, .55 + w * .1, .9 - w * .2], i * 3); }
+  g.setAttribute("position", new THREE.BufferAttribute(p, 3)); g.setAttribute("sz", new THREE.BufferAttribute(s, 1));
+  g.setAttribute("br", new THREE.BufferAttribute(b, 1)); g.setAttribute("col", new THREE.BufferAttribute(c, 3));
+  const dust = new THREE.Points(g, new THREE.ShaderMaterial({ uniforms: ru, ...blend, vertexShader: rm.vertexShader,
+    fragmentShader: `precision mediump float; varying vec3 vC; varying float vA; void main(){ float d=length(gl_PointCoord-.5); if(d>.5) discard; float a=pow(1.-2.*d,2.); gl_FragColor=vec4(vC*a*vA,1.); }` }));
+  dust.frustumCulled = false; scene.add(dust); }
+
+// ---------- camera control ----------
+const cam = { th: 0.6, ph: 1.05, d: 105, tth: 0.6, tph: 1.05, td: 105 };
+let tour = true, drag = false, lx = 0, ly = 0, mouse = null;
+canvas.addEventListener("pointerdown", e => { drag = true; lx = e.clientX; ly = e.clientY; canvas.classList.add("drag"); canvas.setPointerCapture(e.pointerId); });
+addEventListener("pointerup", () => { drag = false; canvas.classList.remove("drag"); });
+addEventListener("pointermove", e => { mouse = [e.clientX, e.clientY];
+  if (!drag) return; cam.tth -= (e.clientX - lx) * .006; cam.tph = Math.max(.15, Math.min(Math.PI - .15, cam.tph - (e.clientY - ly) * .006)); lx = e.clientX; ly = e.clientY; });
+canvas.addEventListener("wheel", e => { e.preventDefault(); cam.td = Math.max(12, Math.min(320, cam.td * Math.exp(e.deltaY * .001))); }, { passive: false });
+
+// ---------- timeline ----------
+let now = 0, playing = true, speed = 1, clock = 0, last = performance.now();
+const $ = id => document.getElementById(id);
+const play = $("play"), scrub = $("scrub"), tourBtn = $("tour");
+const setPlaying = p => { playing = p; play.innerHTML = p ? "&#10074;&#10074;" : "&#9654;"; };
+play.onclick = () => { if (now >= span) now = 0; setPlaying(!playing); };
+scrub.oninput = () => { now = scrub.value / 10000 * span; };
+$("speed").onchange = e => { speed = +e.target.value; };
+tourBtn.onclick = () => { tour = !tour; tourBtn.classList.toggle("on", tour); };
+addEventListener("keydown", e => { if (e.code === "Space") { e.preventDefault(); play.click(); } if (e.key === "t") tourBtn.click(); });
+
+$("sub").textContent = new Date(T0 * 1000).getFullYear() + " — " + new Date(commits[commits.length - 1][1] * 1000).getFullYear() + " · " + repos.length + " systems";
+$("sCommits").textContent = "0";
+
+// rhythm heatmap
+const rc = $("rc").getContext("2d"), gridCount = new Float32Array(168);
+let gridUpto = 0, gridMax = 1;
+function drawRhythm(upto) {
+  if (upto < gridUpto) { gridCount.fill(0); gridUpto = 0; gridMax = 1; }
+  for (let i = gridUpto; i < upto; i++) { const v = ++gridCount[grid[i]]; if (v > gridMax) gridMax = v; }
+  gridUpto = upto;
+  rc.clearRect(0, 0, 240, 84);
+  const cw = 10, ch = 12;
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+    const t = Math.pow(gridCount[d * 24 + h] / gridMax, .55), [r, g, b] = hourColor(h);
+    rc.fillStyle = t < .01 ? "rgba(143,180,255,.06)" : `rgba(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0},${.18 + .82 * t})`;
+    rc.fillRect(h * cw + 1, d * ch + 1, cw - 2, ch - 2);
+  }
+}
+
+// ---------- tooltip ----------
+const tip = $("tip"), v3 = new THREE.Vector3();
+function hover(w, h, repoCounts) {
+  if (!mouse || drag) { tip.style.display = "none"; return; }
+  let best = -1, bd = 26 * 26;
+  for (let i = 0; i < repos.length; i++) { if (!repoCounts[i]) continue;
+    v3.set(pos[i][0], pos[i][1], pos[i][2]).project(camera); if (v3.z > 1) continue;
+    const dx = (v3.x * .5 + .5) * w - mouse[0], dy = (-v3.y * .5 + .5) * h - mouse[1], d = dx * dx + dy * dy;
+    if (d < bd) { bd = d; best = i; } }
+  if (best < 0) { tip.style.display = "none"; return; }
+  tip.style.display = "block"; tip.style.left = mouse[0] + "px"; tip.style.top = mouse[1] + "px";
+  tip.innerHTML = `<b>${repos[best].n.replace(/</g, "&lt;")}</b><br>${repoCounts[best]} / ${repos[best].k} commits`;
+}
+
+// ---------- main loop ----------
+const repoCounts = new Array(repos.length).fill(0);
+function resize() {
+  const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  cu.uPx.value = h * renderer.getPixelRatio() * 0.5 / Math.tan(camera.fov * Math.PI / 360);
+}
+addEventListener("resize", resize); resize();
+
+function frame(t) {
+  const dt = Math.min(0.1, (t - last) / 1000); last = t; clock += dt;
+  if (playing) { now += dt * speed * span / 75; if (now >= span) { now = span; setPlaying(false); } }
+  scrub.value = now / span * 10000;
+  cu.uTime.value = clock; cu.uNow.value = now;
+
+  const upto = bsearch(births, now);
+  $("sCommits").textContent = upto.toLocaleString();
+  $("sLines").textContent = fmt(cumLines[upto]);
+  let alive = 0;
+  for (let i = 0; i < repos.length; i++) {
+    const rb = repoBirths[i], n = bsearch(rb, now), recent = n - bsearch(rb, now - 3);
+    repoCounts[i] = n; if (n) alive++;
+    rSz[i] = n ? 2.2 + Math.log2(1 + n) * 1.0 : 0;
+    rBr[i] = n ? Math.min(1.6, .55 + recent * .25) : 0;
+  }
+  rg.attributes.sz.needsUpdate = rg.attributes.br.needsUpdate = true;
+  $("sRepos").textContent = alive;
+  $("date").textContent = new Date(commits[Math.max(0, upto - 1)][1] * 1000).toISOString().slice(0, 10);
+  drawRhythm(upto);
+
+  if (tour && !drag) { cam.tth += dt * .07; cam.tph = 1.0 + Math.sin(clock * .05) * .22; cam.td = cam.td + (105 + Math.sin(clock * .08) * 30 - cam.td) * dt * .3; cam.th = cam.tth; }
+  cam.th += (cam.tth - cam.th) * .08; cam.ph += (cam.tph - cam.ph) * .08; cam.d += (cam.td - cam.d) * .08;
+  camera.position.set(cam.d * Math.sin(cam.ph) * Math.cos(cam.th), cam.d * Math.cos(cam.ph), cam.d * Math.sin(cam.ph) * Math.sin(cam.th));
+  camera.lookAt(0, 0, 0); camera.updateMatrixWorld();
+  commitPts.rotation.y = repoPts.rotation.y = 0;
+  renderer.render(scene, camera);
+  hover(innerWidth, innerHeight, repoCounts);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
